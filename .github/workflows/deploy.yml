@@ -1,0 +1,199 @@
+name: Reusable · Deploy to VPS
+
+# Reusable workflow (workflow_call) que despliega por SSH en el VPS:
+#   docker login GHCR -> pull (o retag de un <sha> para rollback) -> migraciones
+#   opcionales -> compose up -> smoke check -> avisos a Discord (inicio/ok/fallo).
+#
+# Se llama desde cada repo con `secrets: inherit`. El caller controla los triggers
+# (auto-deploy por workflow_run tras el build, y deploy/rollback manual por
+# workflow_dispatch pasando image_tag). Ej:
+#
+#   jobs:
+#     deploy:
+#       uses: Suantechs/.github/.github/workflows/deploy.yml@master
+#       with:
+#         image_name: enki
+#         app_dir: /opt/apps/enki
+#         smoke_url: https://enkipanama.com/
+#       secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      image_name:
+        description: 'Nombre de la imagen en ghcr.io/suantechs/<image_name> (para el retag de rollback).'
+        required: true
+        type: string
+      app_dir:
+        description: 'Directorio del stack en el VPS (ej. /opt/apps/enki).'
+        required: true
+        type: string
+      compose_file:
+        description: 'Nombre del archivo compose dentro de app_dir.'
+        required: false
+        type: string
+        default: 'docker-compose.prod.yml'
+      image_tag:
+        description: 'Tag a desplegar: "latest" o un <sha> para rollback.'
+        required: false
+        type: string
+        default: 'latest'
+      service:
+        description: 'Servicio del compose a actualizar/migrar (vacío = todos).'
+        required: false
+        type: string
+        default: 'app'
+      run_migrations:
+        description: 'Corre migraciones forward-only antes de levantar la app (arquetipo NestJS).'
+        required: false
+        type: boolean
+        default: false
+      migration_cmd:
+        description: 'Comando de migración a ejecutar dentro del servicio.'
+        required: false
+        type: string
+        default: 'npm run migration:run:prod'
+      migration_deps:
+        description: 'Servicios a levantar antes de migrar (ej. "postgres redis").'
+        required: false
+        type: string
+        default: 'postgres'
+      smoke_url:
+        description: 'URL a verificar tras el deploy (curl -fsS desde el VPS). Vacío = sin smoke.'
+        required: false
+        type: string
+        default: ''
+      app_label:
+        description: 'Nombre legible para los avisos de Discord (default = image_name).'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  deploy:
+    name: Pull & restart on VPS
+    runs-on: ubuntu-latest
+    env:
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      IMAGE: ghcr.io/suantechs/${{ inputs.image_name }}
+      IMAGE_TAG: ${{ inputs.image_tag }}
+      APP_DIR: ${{ inputs.app_dir }}
+      COMPOSE_FILE: ${{ inputs.compose_file }}
+      SERVICE: ${{ inputs.service }}
+      RUN_MIGRATIONS: ${{ inputs.run_migrations }}
+      MIGRATION_CMD: ${{ inputs.migration_cmd }}
+      MIGRATION_DEPS: ${{ inputs.migration_deps }}
+      SMOKE_URL: ${{ inputs.smoke_url }}
+      LABEL: ${{ inputs.app_label != '' && inputs.app_label || inputs.image_name }}
+
+    steps:
+      - name: Notify deploy initiated (Discord)
+        if: ${{ env.DISCORD_WEBHOOK_URL != '' }}
+        continue-on-error: true
+        run: |
+          curl -s -H "Content-Type: application/json" -X POST "$DISCORD_WEBHOOK_URL" -d @- <<JSON
+          {
+            "username": "Suantechs Deploy",
+            "embeds": [{
+              "title": "🚀 ${{ env.LABEL }} · Deploy iniciado",
+              "color": 3447003,
+              "fields": [
+                { "name": "Tag", "value": "\`${{ env.IMAGE_TAG }}\`", "inline": true },
+                { "name": "Disparo", "value": "${{ github.event_name }}", "inline": true },
+                { "name": "Por", "value": "${{ github.actor }}", "inline": true }
+              ],
+              "url": "${{ env.RUN_URL }}"
+            }]
+          }
+          JSON
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        env:
+          GHCR_USER: ${{ secrets.GHCR_USER }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          envs: IMAGE,IMAGE_TAG,APP_DIR,COMPOSE_FILE,SERVICE,RUN_MIGRATIONS,MIGRATION_CMD,MIGRATION_DEPS,SMOKE_URL,GHCR_USER,GHCR_TOKEN
+          script_stop: true
+          script: |
+            set -e
+            # Login a GHCR si hay credenciales (necesario para paquetes privados).
+            if [ -n "$GHCR_TOKEN" ]; then
+              echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            fi
+            cd "$APP_DIR"
+            echo "Desplegando $IMAGE tag: $IMAGE_TAG"
+
+            if [ "$IMAGE_TAG" = "latest" ] || [ -z "$IMAGE_TAG" ]; then
+              docker compose -f "$COMPOSE_FILE" pull
+            else
+              # Rollback / pin: bajamos el <sha> y lo retageamos como :latest local,
+              # para que el compose (que referencia :latest) lo use.
+              docker pull "$IMAGE:$IMAGE_TAG"
+              docker tag "$IMAGE:$IMAGE_TAG" "$IMAGE:latest"
+            fi
+
+            if [ "$RUN_MIGRATIONS" = "true" ]; then
+              echo "Corriendo migraciones (forward-only)..."
+              docker compose -f "$COMPOSE_FILE" up -d $MIGRATION_DEPS
+              docker compose -f "$COMPOSE_FILE" run --rm "$SERVICE" $MIGRATION_CMD
+            fi
+
+            docker compose -f "$COMPOSE_FILE" up -d --no-build
+            docker image prune -f
+
+            if [ -n "$SMOKE_URL" ]; then
+              echo "Smoke check: $SMOKE_URL"
+              OK=""
+              for i in $(seq 1 10); do
+                if curl -fsS "$SMOKE_URL" >/dev/null 2>&1; then OK=1; break; fi
+                echo "  esperando... ($i/10)"; sleep 3
+              done
+              if [ -z "$OK" ]; then echo "❌ smoke check falló: $SMOKE_URL"; exit 1; fi
+              echo "✅ smoke OK"
+            fi
+            echo "✅ $IMAGE arriba — tag $IMAGE_TAG"
+
+      - name: Notify deploy completed (Discord)
+        if: ${{ success() && env.DISCORD_WEBHOOK_URL != '' }}
+        continue-on-error: true
+        run: |
+          curl -s -H "Content-Type: application/json" -X POST "$DISCORD_WEBHOOK_URL" -d @- <<JSON
+          {
+            "username": "Suantechs Deploy",
+            "embeds": [{
+              "title": "✅ ${{ env.LABEL }} · Deploy completado",
+              "color": 3066993,
+              "fields": [
+                { "name": "Tag", "value": "\`${{ env.IMAGE_TAG }}\`", "inline": true },
+                { "name": "Commit", "value": "\`${{ github.sha }}\`", "inline": true },
+                { "name": "Por", "value": "${{ github.actor }}", "inline": true }
+              ],
+              "url": "${{ env.RUN_URL }}"
+            }]
+          }
+          JSON
+
+      - name: Notify deploy failed (Discord)
+        if: ${{ failure() && env.DISCORD_WEBHOOK_URL != '' }}
+        continue-on-error: true
+        run: |
+          curl -s -H "Content-Type: application/json" -X POST "$DISCORD_WEBHOOK_URL" -d @- <<JSON
+          {
+            "username": "Suantechs Deploy",
+            "embeds": [{
+              "title": "❌ ${{ env.LABEL }} · Deploy falló",
+              "color": 15158332,
+              "description": "Revisá los logs. Rollback: Run workflow → image_tag = un <sha> previo.",
+              "fields": [
+                { "name": "Tag", "value": "\`${{ env.IMAGE_TAG }}\`", "inline": true },
+                { "name": "Commit", "value": "\`${{ github.sha }}\`", "inline": true }
+              ],
+              "url": "${{ env.RUN_URL }}"
+            }]
+          }
+          JSON

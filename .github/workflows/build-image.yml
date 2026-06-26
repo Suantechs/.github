@@ -1,0 +1,86 @@
+name: Reusable · Build & push image
+
+# Reusable workflow (workflow_call) que construye una imagen Docker y la publica
+# en GHCR con tags `latest` y `<sha>` (el `<sha>` permite rollback en el deploy).
+#
+# El build de la imagen ES el gate de CI: si el Dockerfile (que normalmente corre
+# `npm run build` / `astro build` / `nest build`) falla, el workflow falla.
+#
+# Se llama desde cada repo con ~10 líneas + `secrets: inherit`. Ej:
+#
+#   jobs:
+#     build:
+#       uses: Suantechs/.github/.github/workflows/build-image.yml@master
+#       with:
+#         image_name: enki
+#       secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      image_name:
+        description: 'Nombre de la imagen sin registry ni tag. Se publica en ghcr.io/suantechs/<image_name>.'
+        required: true
+        type: string
+      context:
+        description: 'Contexto de build de Docker.'
+        required: false
+        type: string
+        default: '.'
+      dockerfile:
+        description: 'Ruta al Dockerfile.'
+        required: false
+        type: string
+        default: './Dockerfile'
+      build_args:
+        description: 'build-args (formato multilínea KEY=VALUE).'
+        required: false
+        type: string
+        default: ''
+      needs_node_auth:
+        description: 'Pasa node_auth_token como build secret (para instalar paquetes privados @suantechs/* en el Dockerfile).'
+        required: false
+        type: boolean
+        default: false
+    # Los secrets llegan vía `secrets: inherit` desde el caller. NODE_AUTH_TOKEN
+    # es opcional (solo arquetipo NestJS con paquetes privados).
+    secrets:
+      NODE_AUTH_TOKEN:
+        required: false
+
+jobs:
+  build:
+    name: Build & push ${{ inputs.image_name }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/suantechs/${{ inputs.image_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
+          build-args: ${{ inputs.build_args }}
+          # Solo se inyecta node_auth_token cuando el repo lo pide (paquetes privados).
+          secrets: ${{ inputs.needs_node_auth && format('node_auth_token={0}', secrets.NODE_AUTH_TOKEN) || '' }}
+          cache-from: type=gha,scope=${{ inputs.image_name }}
+          cache-to: type=gha,mode=max,scope=${{ inputs.image_name }}
