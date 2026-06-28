@@ -1,4 +1,4 @@
-name: Reusable · Build & push image
+name: Reusable build and push image
 
 # Reusable workflow (workflow_call) que construye una imagen Docker y la publica
 # en GHCR con tags `latest` y `<sha>` (el `<sha>` permite rollback en el deploy).
@@ -33,21 +33,17 @@ on:
         type: string
         default: './Dockerfile'
       build_args:
-        description: 'build-args (formato multilínea KEY=VALUE).'
+        description: 'build-args (formato multilínea KEY=VALUE). Útil para inyectar GIT_SHA, etc.'
         required: false
         type: string
         default: ''
-      needs_node_auth:
-        description: 'Pasa node_auth_token como build secret (para instalar paquetes privados @suantechs/* en el Dockerfile).'
+    secrets:
+      NODE_AUTH_TOKEN:
+        description: 'PAT con read:packages para instalar paquetes privados @suantechs/* en el Dockerfile (arquetipo NestJS). Opcional.'
         required: false
-        type: boolean
-        default: false
-    # Los secrets (incl. NODE_AUTH_TOKEN, opcional para el arquetipo NestJS) llegan
-    # vía `secrets: inherit` desde el caller; no se declaran aquí.
 
 jobs:
   build:
-    name: Build & push ${{ inputs.image_name }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -77,7 +73,8 @@ jobs:
             ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:${{ github.sha }}
           build-args: ${{ inputs.build_args }}
-          # Solo se inyecta node_auth_token cuando el repo lo pide (paquetes privados).
-          secrets: ${{ inputs.needs_node_auth && format('node_auth_token={0}', secrets.NODE_AUTH_TOKEN) || '' }}
+          # node_auth_token se pasa como build secret (vacío si el repo no lo define).
+          secrets: |
+            node_auth_token=${{ secrets.NODE_AUTH_TOKEN }}
           cache-from: type=gha,scope=${{ inputs.image_name }}
           cache-to: type=gha,mode=max,scope=${{ inputs.image_name }}
