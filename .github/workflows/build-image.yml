@@ -42,11 +42,8 @@ on:
         required: false
         type: boolean
         default: false
-    # Los secrets llegan vía `secrets: inherit` desde el caller. NODE_AUTH_TOKEN
-    # es opcional (solo arquetipo NestJS con paquetes privados).
-    secrets:
-      NODE_AUTH_TOKEN:
-        required: false
+    # Los secrets (incl. NODE_AUTH_TOKEN, opcional para el arquetipo NestJS) llegan
+    # vía `secrets: inherit` desde el caller; no se declaran aquí.
 
 jobs:
   build:
