@@ -60,6 +60,11 @@ on:
   workflow_dispatch:
 jobs:
   build:
+    # Obligatorio: el caller concede los permisos del GITHUB_TOKEN al reusable.
+    # Sin packages: write, el run falla al arrancar (startup_failure).
+    permissions:
+      contents: read
+      packages: write
     uses: Suantechs/.github/.github/workflows/build-image.yml@master
     with:
       image_name: enki
