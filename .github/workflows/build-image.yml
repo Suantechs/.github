@@ -47,9 +47,12 @@ on:
         description: 'PAT con read:packages para instalar paquetes privados @suantechs/* en el Dockerfile (arquetipo NestJS). Opcional.'
         required: false
 
+# STP-216 — el CI corre en el ThinkCentre del homelab. `CI_RUNNER` es una
+# variable de repositorio: con valor `homelab` los jobs van al runner propio;
+# borrarla los devuelve a los runners de GitHub en un clic, sin tocar codigo.
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     permissions:
       contents: read
       packages: write
