@@ -69,10 +69,13 @@ on:
         type: string
         default: ''
 
+# STP-216 — el CI corre en el ThinkCentre del homelab. `CI_RUNNER` es una
+# variable de repositorio: con valor `homelab` los jobs van al runner propio;
+# borrarla los devuelve a los runners de GitHub en un clic, sin tocar codigo.
 jobs:
   deploy:
     name: Pull & restart on VPS
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     env:
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
