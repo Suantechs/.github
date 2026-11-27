@@ -114,8 +114,11 @@ jobs:
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1
         env:
-          GHCR_USER: ${{ secrets.GHCR_USER }}
-          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          # Sin secret propio, se usa el GITHUB_TOKEN del caller (packages: read y
+          # paquete ligado al repo). Sin login, el VPS reusa la credencial que dejó
+          # otro repo en ~/.docker/config.json, ya expirada => "denied" (ENKI-25).
+          GHCR_USER: ${{ secrets.GHCR_USER || github.actor }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN || github.token }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
